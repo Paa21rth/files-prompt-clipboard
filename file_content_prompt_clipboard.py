@@ -1,5 +1,4 @@
 import os
-import sys
 import platform
 import subprocess
 from pathlib import Path
@@ -7,12 +6,58 @@ from pathlib import Path
 
 BANNER = "-------------------------CONTENT OF FILES-------------------------"
 
+DEFAULT_IGNORED_EXTS = {
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".heic",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".ico",
+    ".svg",
+    ".avif",
+    ".mp4",
+    ".mov",
+    ".mkv",
+    ".avi",
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".m4a",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".tgz",
+    ".bz2",
+    ".xz",
+    ".7z",
+    ".rar",
+    ".dmg",
+    ".iso",
+    ".exe",
+    ".msi",
+    ".apk",
+    ".bin",
+    ".o",
+    ".a",
+    ".so",
+    ".dylib",
+    ".dll",
+    ".class",
+    ".jar",
+}
+
 
 def welcome_message() -> str:
     return (
         "File Content → Clipboard\n"
         "Enter one or more folder paths separated by commas.\n"
         "Then enter unwanted filenames (also comma-separated) to ignore everywhere.\n"
+        "Binary/media files are auto-ignored by extension.\n"
     )
 
 
@@ -38,11 +83,20 @@ def validate_folders(paths: list[str]) -> tuple[list[Path], list[str]]:
     return ok, bad
 
 
+def is_auto_ignored_by_ext(p: Path) -> bool:
+    return p.suffix.lower() in DEFAULT_IGNORED_EXTS
+
+
 def iter_files(folder: Path, ignore_names: set[str]) -> list[Path]:
     files: list[Path] = []
     for p in folder.rglob("*"):
-        if p.is_file() and p.name not in ignore_names:
-            files.append(p)
+        if not p.is_file():
+            continue
+        if p.name in ignore_names:
+            continue
+        if is_auto_ignored_by_ext(p):
+            continue
+        files.append(p)
     files.sort(key=lambda x: str(x).lower())
     return files
 
@@ -78,6 +132,14 @@ def format_output(folders: list[Path], ignore_names: set[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def which(cmd: str) -> str | None:
+    try:
+        from shutil import which as _which
+        return _which(cmd)
+    except Exception:
+        return None
+
+
 def copy_to_clipboard(text: str) -> None:
     system = platform.system().lower()
 
@@ -89,29 +151,19 @@ def copy_to_clipboard(text: str) -> None:
         subprocess.run(["clip"], input=text, text=True, check=True)
         return
 
-    if shutil_which("wl-copy"):
+    if which("wl-copy"):
         subprocess.run(["wl-copy"], input=text, text=True, check=True)
         return
 
-    if shutil_which("xclip"):
+    if which("xclip"):
         subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=True)
         return
 
-    if shutil_which("xsel"):
+    if which("xsel"):
         subprocess.run(["xsel", "--clipboard", "--input"], input=text, text=True, check=True)
         return
 
-    raise RuntimeError(
-        "No clipboard tool found. Install one of: wl-copy (Wayland), xclip, or xsel."
-    )
-
-
-def shutil_which(cmd: str) -> str | None:
-    try:
-        from shutil import which
-        return which(cmd)
-    except Exception:
-        return None
+    raise RuntimeError("No clipboard tool found. Install wl-copy, xclip, or xsel.")
 
 
 def prompt_folders() -> list[str]:
