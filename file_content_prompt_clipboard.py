@@ -4,7 +4,8 @@ import subprocess
 from pathlib import Path
 
 
-BANNER = "-------------------------CONTENT OF FILES-------------------------"
+BANNER_CONTENT = "-------------------------CONTENT OF FILES-------------------------"
+BANNER_TREE = "-------------------------FILE STRUCTURE-------------------------"
 
 DEFAULT_IGNORED_EXTS = {
     ".pdf",
@@ -55,9 +56,11 @@ DEFAULT_IGNORED_EXTS = {
 def welcome_message() -> str:
     return (
         "File Content → Clipboard\n"
-        "Enter one or more folder paths separated by commas.\n"
-        "Then enter unwanted filenames (also comma-separated) to ignore everywhere.\n"
-        "Binary/media files are auto-ignored by extension.\n"
+        "Modes:\n"
+        "  - route-to-leaf = no  → flat list per provided folder\n"
+        "  - route-to-leaf = yes → tree traversal, printing paths per leaf file\n"
+        "You can also toggle whether hidden files/folders (starting with '.') are included.\n"
+        "At the end, a tree-like file structure will be appended.\n"
     )
 
 
@@ -69,6 +72,23 @@ def parse_csv_input(raw: str) -> list[str]:
 def normalize_ignore_set(raw: str) -> set[str]:
     items = parse_csv_input(raw)
     return {Path(x).name for x in items if x}
+
+
+def parse_yes_no(raw: str, default: bool = False) -> bool:
+    s = (raw or "").strip().lower()
+    if not s:
+        return default
+    yes = {"y", "yes", "ye", "yep", "yeah", "ja", "j", "ok", "okay", "o", "oui", "si"}
+    no = {"n", "no", "nein", "nop"}
+    if s in yes:
+        return True
+    if s in no:
+        return False
+    if s.startswith("y"):
+        return True
+    if s.startswith("n"):
+        return False
+    return default
 
 
 def validate_folders(paths: list[str]) -> tuple[list[Path], list[str]]:
@@ -83,22 +103,40 @@ def validate_folders(paths: list[str]) -> tuple[list[Path], list[str]]:
     return ok, bad
 
 
+def which(cmd: str) -> str | None:
+    try:
+        from shutil import which as _which
+        return _which(cmd)
+    except Exception:
+        return None
+
+
+def copy_to_clipboard(text: str) -> None:
+    system = platform.system().lower()
+    if system == "darwin":
+        subprocess.run(["pbcopy"], input=text, text=True, check=True)
+        return
+    if system == "windows":
+        subprocess.run(["clip"], input=text, text=True, check=True)
+        return
+    if which("wl-copy"):
+        subprocess.run(["wl-copy"], input=text, text=True, check=True)
+        return
+    if which("xclip"):
+        subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=True)
+        return
+    if which("xsel"):
+        subprocess.run(["xsel", "--clipboard", "--input"], input=text, text=True, check=True)
+        return
+    raise RuntimeError("No clipboard tool found. Install wl-copy, xclip, or xsel.")
+
+
+def is_hidden_path(p: Path) -> bool:
+    return any(part.startswith(".") and part not in (".", "..") for part in p.parts)
+
+
 def is_auto_ignored_by_ext(p: Path) -> bool:
     return p.suffix.lower() in DEFAULT_IGNORED_EXTS
-
-
-def iter_files(folder: Path, ignore_names: set[str]) -> list[Path]:
-    files: list[Path] = []
-    for p in folder.rglob("*"):
-        if not p.is_file():
-            continue
-        if p.name in ignore_names:
-            continue
-        if is_auto_ignored_by_ext(p):
-            continue
-        files.append(p)
-    files.sort(key=lambda x: str(x).lower())
-    return files
 
 
 def read_text_best_effort(p: Path) -> str:
@@ -117,11 +155,27 @@ def read_text_best_effort(p: Path) -> str:
         return ""
 
 
-def format_output(folders: list[Path], ignore_names: set[str]) -> str:
-    lines: list[str] = [BANNER]
+def iter_files_flat(folder: Path, ignore_names: set[str], include_hidden: bool) -> list[Path]:
+    files: list[Path] = []
+    for p in folder.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.name in ignore_names:
+            continue
+        if is_auto_ignored_by_ext(p):
+            continue
+        if not include_hidden and is_hidden_path(p.relative_to(folder)):
+            continue
+        files.append(p)
+    files.sort(key=lambda x: str(x).lower())
+    return files
+
+
+def format_output_flat(folders: list[Path], ignore_names: set[str], include_hidden: bool) -> str:
+    lines: list[str] = [BANNER_CONTENT]
     for folder in folders:
         lines.append(f"/{folder.name}")
-        for f in iter_files(folder, ignore_names):
+        for f in iter_files_flat(folder, ignore_names, include_hidden):
             rel = f.relative_to(folder)
             file_label = "/" + str(rel).replace(os.sep, "/")
             lines.append(f"{file_label}:")
@@ -132,38 +186,99 @@ def format_output(folders: list[Path], ignore_names: set[str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def which(cmd: str) -> str | None:
+def list_dir_sorted(p: Path) -> list[Path]:
     try:
-        from shutil import which as _which
-        return _which(cmd)
+        items = list(p.iterdir())
     except Exception:
-        return None
+        return []
+    items.sort(key=lambda x: (not x.is_dir(), x.name.lower()))
+    return items
 
 
-def copy_to_clipboard(text: str) -> None:
-    system = platform.system().lower()
+def format_output_route_to_leaf(
+    roots: list[Path],
+    ignore_names: set[str],
+    include_hidden: bool,
+) -> str:
+    lines: list[str] = [BANNER_CONTENT]
 
-    if system == "darwin":
-        subprocess.run(["pbcopy"], input=text, text=True, check=True)
-        return
+    def walk_dir(root: Path, current: Path) -> None:
+        for entry in list_dir_sorted(current):
+            rel = entry.relative_to(root)
+            if not include_hidden and is_hidden_path(rel):
+                continue
 
-    if system == "windows":
-        subprocess.run(["clip"], input=text, text=True, check=True)
-        return
+            if entry.is_dir():
+                walk_dir(root, entry)
+                continue
 
-    if which("wl-copy"):
-        subprocess.run(["wl-copy"], input=text, text=True, check=True)
-        return
+            if entry.name in ignore_names:
+                continue
+            if is_auto_ignored_by_ext(entry):
+                continue
 
-    if which("xclip"):
-        subprocess.run(["xclip", "-selection", "clipboard"], input=text, text=True, check=True)
-        return
+            route_parts = [root.name] + list(rel.parts[:-1])
+            route = "/" + "/".join(route_parts) if route_parts else f"/{root.name}"
 
-    if which("xsel"):
-        subprocess.run(["xsel", "--clipboard", "--input"], input=text, text=True, check=True)
-        return
+            lines.append(route)
+            lines.append(f"/{rel.name}:")
+            content = read_text_best_effort(entry)
+            lines.append(content.rstrip("\n"))
+            lines.append("---end-of-file")
 
-    raise RuntimeError("No clipboard tool found. Install wl-copy, xclip, or xsel.")
+    for root in roots:
+        walk_dir(root, root)
+        lines.append(f"----end-of-/{root.name}----files")
+
+    return "\n".join(lines) + "\n"
+
+
+def build_tree_lines(root: Path, include_hidden: bool) -> list[str]:
+    lines: list[str] = []
+
+    def children(dir_path: Path) -> list[Path]:
+        items = list_dir_sorted(dir_path)
+        if include_hidden:
+            return items
+        out: list[Path] = []
+        for it in items:
+            rel = it.relative_to(root)
+            if is_hidden_path(rel):
+                continue
+            out.append(it)
+        return out
+
+    def walk(dir_path: Path, prefix: str) -> None:
+        items = children(dir_path)
+        for idx, item in enumerate(items):
+            last = idx == (len(items) - 1)
+            connector = "└── " if last else "├── "
+            lines.append(prefix + connector + item.name)
+            if item.is_dir():
+                extension = "    " if last else "│   "
+                walk(item, prefix + extension)
+
+    lines.append(root.name)
+    walk(root, "")
+    return lines
+
+
+def format_file_structure(folders: list[Path], include_hidden: bool) -> str:
+    lines: list[str] = [BANNER_TREE]
+    for root in folders:
+        lines.extend(build_tree_lines(root, include_hidden))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def prompt_route_to_leaf() -> bool:
+    raw = input("Route-to-leaf mode? (yes/no): ").strip()
+    return parse_yes_no(raw, default=False)
+
+
+def prompt_include_hidden() -> bool:
+    raw = input("Include hidden files/folders (starting with '.')? (yes/no): ").strip()
+    return parse_yes_no(raw, default=True)
 
 
 def prompt_folders() -> list[str]:
@@ -178,6 +293,9 @@ def prompt_ignore_files() -> set[str]:
 
 def main() -> int:
     print(welcome_message())
+
+    route_to_leaf = prompt_route_to_leaf()
+    include_hidden = prompt_include_hidden()
 
     folder_inputs = prompt_folders()
     if not folder_inputs:
@@ -195,14 +313,21 @@ def main() -> int:
         print("No valid folders to process.")
         return 1
 
-    text = format_output(folders, ignore_names)
+    if route_to_leaf:
+        content_part = format_output_route_to_leaf(folders, ignore_names, include_hidden)
+    else:
+        content_part = format_output_flat(folders, ignore_names, include_hidden)
+
+    tree_part = format_file_structure(folders, include_hidden)
+
+    full_text = content_part.rstrip("\n") + "\n\n" + tree_part
 
     try:
-        copy_to_clipboard(text)
+        copy_to_clipboard(full_text)
     except Exception as e:
         print(f"Clipboard copy failed: {e}")
         print("\nOutput (copy manually):\n")
-        print(text)
+        print(full_text)
         return 2
 
     print(f"Copied to clipboard. Processed {len(folders)} folder(s).")
